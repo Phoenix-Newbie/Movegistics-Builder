@@ -3,3 +3,6 @@ pandas>=2.0.0
 numpy>=1.24.0
 openpyxl>=3.1.0
 xlrd>=2.0.0
+gspread>=5.0.0
+google-auth>=2.0.0
+google-api-python-client>=2.0.0
