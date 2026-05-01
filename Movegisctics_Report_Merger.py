@@ -44,8 +44,8 @@ def get_sheets_service():
         st.error(f"Google Sheets connection failed: {e}")
         return None
 
-# ── Write/overwrite a tab ─────────────────────────────────────────────────────
-def write_sheet_tab(sheets_svc, tab_name, df):
+# ── Write/overwrite a tab (chunked to avoid Broken Pipe on large files) ───────
+def write_sheet_tab(sheets_svc, tab_name, df, chunk_size=2000):
     try:
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
         existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
@@ -57,14 +57,20 @@ def write_sheet_tab(sheets_svc, tab_name, df):
         sheets_svc.spreadsheets().values().clear(
             spreadsheetId=SHEET_ID, range=f"'{tab_name}'"
         ).execute()
+
         df_clean = df.fillna("").astype(str)
-        values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
-        sheets_svc.spreadsheets().values().update(
-            spreadsheetId=SHEET_ID,
-            range=f"'{tab_name}'!A1",
-            valueInputOption="RAW",
-            body={"values": values}
-        ).execute()
+        all_values = [df_clean.columns.tolist()] + df_clean.values.tolist()
+
+        # Write in chunks to avoid timeout / broken pipe on large datasets
+        for i in range(0, len(all_values), chunk_size):
+            chunk = all_values[i:i + chunk_size]
+            sheets_svc.spreadsheets().values().update(
+                spreadsheetId=SHEET_ID,
+                range=f"'{tab_name}'!A{i + 1}",
+                valueInputOption="RAW",
+                body={"values": chunk}
+            ).execute()
+
         return True
     except Exception as e:
         st.warning(f"Could not write tab '{tab_name}': {e}")
