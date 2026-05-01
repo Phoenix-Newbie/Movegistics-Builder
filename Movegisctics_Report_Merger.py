@@ -300,9 +300,9 @@ with tab1:
                         run_id   = f"RUN_{ts_label}"
 
                         for tab_name, df_tab in {
-                            f"ActualIncome_{ts_label}":  ai_raw,
-                            f"JobOverview_{ts_label}":   jo_raw,
-                            f"Opportunities_{ts_label}": op_raw,
+                            f"ActualIncome":  ai_raw,
+                            f"JobOverview":   jo_raw,
+                            f"Opportunities": op_raw,
                         }.items():
                             write_sheet_tab(sheets_svc, tab_name, df_tab)
 
