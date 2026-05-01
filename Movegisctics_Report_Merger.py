@@ -4,7 +4,6 @@ import io
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import gspread
 
 st.set_page_config(page_title="Movegistics Reports Builder", page_icon="📦", layout="wide")
 
@@ -50,21 +49,16 @@ def write_sheet_tab(sheets_svc, tab_name, df):
     try:
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
         existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
-
         if tab_name not in existing:
             sheets_svc.spreadsheets().batchUpdate(
                 spreadsheetId=SHEET_ID,
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
-
         sheets_svc.spreadsheets().values().clear(
-            spreadsheetId=SHEET_ID,
-            range=f"'{tab_name}'!A1"
+            spreadsheetId=SHEET_ID, range=f"'{tab_name}'!A1"
         ).execute()
-
         df_clean = df.fillna("").astype(str)
         values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
-
         sheets_svc.spreadsheets().values().update(
             spreadsheetId=SHEET_ID,
             range=f"'{tab_name}'!A1",
@@ -82,7 +76,6 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
         tab_name   = "Merge Log"
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
         existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
-
         if tab_name not in existing:
             sheets_svc.spreadsheets().batchUpdate(
                 spreadsheetId=SHEET_ID,
@@ -97,7 +90,6 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
                 valueInputOption="RAW",
                 body={"values": headers}
             ).execute()
-
         new_row = [[run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols]]
         sheets_svc.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
@@ -151,7 +143,6 @@ def merge_files(f_ai, f_jo, f_op):
     jo_raw = jo.copy()
     op_raw = op.copy()
 
-    # Prepare ActualIncome
     ai.rename(columns={'Customer Id': 'Customer ID', 'Customer Name': 'Customer Name_ai'}, inplace=True)
     ai_bring = ['Work Order', 'Customer Name_ai', 'Move Coordinator', 'Move Type', 'Move Status',
                 'Move Charges', 'Packing Charges', 'Crating Charges', 'Additional Charges',
@@ -159,7 +150,6 @@ def merge_files(f_ai, f_jo, f_op):
                 'Valuation Charges', 'Discount', 'Service Tax', 'Tips', 'CC Fee', 'Grand Total']
     ai_slim = ai[[c for c in ai_bring if c in ai.columns]]
 
-    # Prepare JobOverview
     jo.rename(columns={
         'Customer Id':  'Customer ID',
         'Account Name': 'Customer Name',
@@ -168,13 +158,11 @@ def merge_files(f_ai, f_jo, f_op):
     }, inplace=True)
     jo.drop(columns=[c for c in ['Opportunity Name'] if c in jo.columns], inplace=True)
 
-    # Merge 1: JO + AI
     m1 = pd.merge(jo, ai_slim, left_on='WO Id', right_on='Work Order', how='left')
     m1.drop(columns=['Work Order'], inplace=True)
     m1['Customer Name'] = m1['Customer Name'].fillna(m1.get('Customer Name_ai'))
     m1.drop(columns=[c for c in ['Customer Name_ai'] if c in m1.columns], inplace=True)
 
-    # Prepare Opportunities
     op.rename(columns={
         'Cust. Id':    'Customer ID',
         'Opp. Amount': 'Estimated_op',
@@ -189,7 +177,6 @@ def merge_files(f_ai, f_jo, f_op):
                 'Origin Details', 'Location Type', 'Destination Details']
     op_slim = op[[c for c in op_bring if c in op.columns]]
 
-    # Merge 2: + OP
     m2 = pd.merge(m1, op_slim, on='Customer ID', how='left')
     m2['Estimated'] = m2['Estimated'].fillna(m2.get('Estimated_op'))
     m2.drop(columns=[c for c in ['Estimated_op', 'Move Date_op', 'Date Booked_op'] if c in m2.columns], inplace=True)
@@ -206,13 +193,13 @@ def to_excel_bytes(df):
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.5</span></div>
+<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.6</span></div>
 <div class="hero-sub">CRM Data Merger — JobOverview · ActualIncome · Opportunities</div>
 """, unsafe_allow_html=True)
 st.markdown("---")
 
 # ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3 = st.tabs(["📂 Upload & Merge", "🔍 Explore & Filter", "💾 Export"])
+tab1, tab2 = st.tabs(["📂 Upload & Merge", "🔍 Explore & Filter"])
 
 # ══ TAB 1 ════════════════════════════════════════════════════════════════════
 with tab1:
@@ -241,46 +228,36 @@ with tab1:
         st.info(
             "**After merge, auto-saves to Google Sheets:**\n\n"
             "📊 `Merge Log` · `ActualIncome` · `JobOverview`\n\n"
-            "📊 `Opportunities` · `Merged Data`\n\n"
-            "*(No Excel file saved to Drive)*"
+            "📊 `Opportunities` · `Merged Data`"
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
+        # ── Merge Button ──────────────────────────────────────────
         if st.button("🔗 Merge & Sync to Sheets", disabled=not (f1 and f2 and f3), use_container_width=True):
             try:
-                # Step 1: Merge
                 with st.spinner("Merging CRM files..."):
                     merged_df, ai_raw, jo_raw, op_raw = merge_files(f1, f2, f3)
                     st.session_state['df']          = merged_df
                     st.session_state['filtered_df'] = merged_df
                     st.success(f"✅ Merged! **{merged_df.shape[0]:,} rows** × **{merged_df.shape[1]} columns**")
 
-                # Step 2: Write to Google Sheets
                 sheets_svc = get_sheets_service()
                 if sheets_svc:
                     with st.spinner("Syncing to Google Sheets..."):
                         ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         run_id = f"RUN_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
-                        tabs = {
+                        for tab_name, df_tab in {
                             "ActualIncome":  ai_raw,
                             "JobOverview":   jo_raw,
                             "Opportunities": op_raw,
                             "Merged Data":   merged_df,
-                        }
-                        for tab_name, df_tab in tabs.items():
+                        }.items():
                             write_sheet_tab(sheets_svc, tab_name, df_tab)
 
-                        log_merge(
-                            sheets_svc,
-                            run_id      = run_id,
-                            ts          = ts,
-                            ai_rows     = len(ai_raw),
-                            jo_rows     = len(jo_raw),
-                            op_rows     = len(op_raw),
-                            merged_rows = merged_df.shape[0],
-                            merged_cols = merged_df.shape[1],
-                        )
+                        log_merge(sheets_svc, run_id=run_id, ts=ts,
+                                  ai_rows=len(ai_raw), jo_rows=len(jo_raw),
+                                  op_rows=len(op_raw), merged_rows=merged_df.shape[0],
+                                  merged_cols=merged_df.shape[1])
 
                         sheet_link = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
                         st.success("✅ All data synced to Google Sheets!")
@@ -290,17 +267,41 @@ with tab1:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-        if 'sheet_link' in st.session_state:
-            st.markdown(f"📊 **Last sync:** [Open Google Sheet]({st.session_state['sheet_link']})")
-
+        # ── Export Buttons (only shown after merge) ───────────────
         if 'df' in st.session_state:
-            df = st.session_state['df']
+            df  = st.session_state['df']
+            ts  = datetime.now().strftime("%Y%m%d_%H%M")
+
+            st.markdown("---")
+            st.markdown('<div class="section-header">💾 Export Merged Data</div>', unsafe_allow_html=True)
+
             c1, c2, c3 = st.columns(3)
             c1.metric("Total Rows",   f"{df.shape[0]:,}")
             c2.metric("Columns",      f"{df.shape[1]}")
             c3.metric("Files Merged", "3")
-            st.markdown('<div class="section-header" style="margin-top:1rem">Preview (first 10 rows)</div>', unsafe_allow_html=True)
-            st.dataframe(df.head(10), use_container_width=True, height=280)
+
+            st.markdown("<br>", unsafe_allow_html=True)
+            ex1, ex2 = st.columns(2)
+
+            with ex1:
+                st.download_button(
+                    "⬇ Download Excel",
+                    to_excel_bytes(df),
+                    file_name=f"movegistics_merged_{ts}.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            with ex2:
+                st.download_button(
+                    "⬇ Download CSV",
+                    df.to_csv(index=False).encode(),
+                    file_name=f"movegistics_merged_{ts}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+
+            if 'sheet_link' in st.session_state:
+                st.markdown(f"📊 **Google Sheet:** [Open Merge Log & Data]({st.session_state['sheet_link']})")
 
 # ══ TAB 2 ════════════════════════════════════════════════════════════════════
 with tab2:
@@ -355,42 +356,6 @@ with tab2:
                 mc = fdf['Move Type'].value_counts().reset_index()
                 mc.columns = ['Move Type', 'Count']
                 st.dataframe(mc, use_container_width=True, hide_index=True)
-
-# ══ TAB 3 ════════════════════════════════════════════════════════════════════
-with tab3:
-    if 'df' not in st.session_state:
-        st.info("Go to **Upload & Merge** tab first to load your data.")
-    else:
-        df  = st.session_state['df']
-        fdf = st.session_state.get('filtered_df', df)
-        ts  = datetime.now().strftime("%Y%m%d_%H%M")
-
-        st.markdown('<div class="section-header">💾 Download Data</div>', unsafe_allow_html=True)
-        e1, e2 = st.columns(2)
-
-        with e1:
-            st.markdown("**Full Merged Dataset**")
-            st.caption(f"{df.shape[0]:,} rows · {df.shape[1]} columns")
-            st.download_button("⬇ Download Full Excel", to_excel_bytes(df),
-                file_name=f"movegistics_full_{ts}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
-            st.download_button("⬇ Download Full CSV", df.to_csv(index=False).encode(),
-                file_name=f"movegistics_full_{ts}.csv", mime="text/csv", use_container_width=True)
-
-        with e2:
-            st.markdown("**Filtered Dataset** *(from Explore tab)*")
-            st.caption(f"{fdf.shape[0]:,} rows · {fdf.shape[1]} columns")
-            st.download_button("⬇ Download Filtered Excel", to_excel_bytes(fdf),
-                file_name=f"movegistics_filtered_{ts}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True)
-            st.download_button("⬇ Download Filtered CSV", fdf.to_csv(index=False).encode(),
-                file_name=f"movegistics_filtered_{ts}.csv", mime="text/csv", use_container_width=True)
-
-        if 'sheet_link' in st.session_state:
-            st.markdown("---")
-            st.markdown(f"📊 **Google Sheet:** [Open Merge Log & Data]({st.session_state['sheet_link']})")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
