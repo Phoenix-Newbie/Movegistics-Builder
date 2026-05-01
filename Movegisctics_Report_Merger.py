@@ -44,19 +44,22 @@ def get_sheets_service():
         st.error(f"Google Sheets connection failed: {e}")
         return None
 
-# ── Write dataframe to a Google Sheet tab ─────────────────────────────────────
+# ── Write/overwrite a tab (for input files) ───────────────────────────────────
 def write_sheet_tab(sheets_svc, tab_name, df):
     try:
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
-        existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
+        existing   = {s['properties']['title']: s['properties']['sheetId'] for s in sheet_meta['sheets']}
+
         if tab_name not in existing:
             sheets_svc.spreadsheets().batchUpdate(
                 spreadsheetId=SHEET_ID,
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
+
         sheets_svc.spreadsheets().values().clear(
             spreadsheetId=SHEET_ID, range=f"'{tab_name}'!A1"
         ).execute()
+
         df_clean = df.fillna("").astype(str)
         values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
         sheets_svc.spreadsheets().values().update(
@@ -70,27 +73,62 @@ def write_sheet_tab(sheets_svc, tab_name, df):
         st.warning(f"Could not write tab '{tab_name}': {e}")
         return False
 
+# ── Create new hidden tab for Merged Data ────────────────────────────────────
+def write_merged_tab(sheets_svc, df, ts_label):
+    try:
+        tab_name   = f"Merged_{ts_label}"
+        sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
+        existing   = {s['properties']['title']: s['properties']['sheetId'] for s in sheet_meta['sheets']}
+
+        # Always create a new sheet with timestamp name
+        res = sheets_svc.spreadsheets().batchUpdate(
+            spreadsheetId=SHEET_ID,
+            body={"requests": [{"addSheet": {"properties": {
+                "title":  tab_name,
+                "hidden": True   # ← auto-hide the tab
+            }}}]}
+        ).execute()
+
+        # Get the new sheet's ID from the response
+        new_sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
+
+        # Write data
+        df_clean = df.fillna("").astype(str)
+        values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
+        sheets_svc.spreadsheets().values().update(
+            spreadsheetId=SHEET_ID,
+            range=f"'{tab_name}'!A1",
+            valueInputOption="RAW",
+            body={"values": values}
+        ).execute()
+
+        return tab_name, new_sheet_id
+    except Exception as e:
+        st.warning(f"Could not write Merged Data tab: {e}")
+        return None, None
+
 # ── Append a row to Merge Log ─────────────────────────────────────────────────
-def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols):
+def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols, merged_tab):
     try:
         tab_name   = "Merge Log"
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
         existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
+
         if tab_name not in existing:
             sheets_svc.spreadsheets().batchUpdate(
                 spreadsheetId=SHEET_ID,
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
-            headers = [["Run ID", "Timestamp", "ActualIncome Rows",
-                        "JobOverview Rows", "Opportunities Rows",
-                        "Merged Rows", "Merged Columns"]]
+            headers = [["Run ID", "Timestamp", "ActualIncome Rows", "JobOverview Rows",
+                        "Opportunities Rows", "Merged Rows", "Merged Columns", "Merged Sheet Tab"]]
             sheets_svc.spreadsheets().values().update(
                 spreadsheetId=SHEET_ID,
                 range=f"'{tab_name}'!A1",
                 valueInputOption="RAW",
                 body={"values": headers}
             ).execute()
-        new_row = [[run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols]]
+
+        new_row = [[run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols, merged_tab]]
         sheets_svc.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
             range=f"'{tab_name}'!A1",
@@ -193,7 +231,7 @@ def to_excel_bytes(df):
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.6</span></div>
+<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.7</span></div>
 <div class="hero-sub">CRM Data Merger — JobOverview · ActualIncome · Opportunities</div>
 """, unsafe_allow_html=True)
 st.markdown("---")
@@ -227,37 +265,52 @@ with tab1:
         st.markdown('<div class="section-header">⚙️ Merge & Save</div>', unsafe_allow_html=True)
         st.info(
             "**After merge, auto-saves to Google Sheets:**\n\n"
-            "📊 `Merge Log` · `ActualIncome` · `JobOverview`\n\n"
-            "📊 `Opportunities` · `Merged Data`"
+            "📊 `Merge Log` · `ActualIncome` · `JobOverview` · `Opportunities`\n\n"
+            "📊 `Merged_YYYYMMDD_HHMMSS` *(new hidden tab per run)*"
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        # ── Merge Button ──────────────────────────────────────────
         if st.button("🔗 Merge & Sync to Sheets", disabled=not (f1 and f2 and f3), use_container_width=True):
             try:
+                # Step 1: Merge
                 with st.spinner("Merging CRM files..."):
                     merged_df, ai_raw, jo_raw, op_raw = merge_files(f1, f2, f3)
                     st.session_state['df']          = merged_df
                     st.session_state['filtered_df'] = merged_df
                     st.success(f"✅ Merged! **{merged_df.shape[0]:,} rows** × **{merged_df.shape[1]} columns**")
 
+                # Step 2: Sync to Sheets
                 sheets_svc = get_sheets_service()
                 if sheets_svc:
                     with st.spinner("Syncing to Google Sheets..."):
-                        ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        run_id = f"RUN_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                        now       = datetime.now()
+                        ts_label  = now.strftime("%Y%m%d_%H%M%S")
+                        ts_log    = now.strftime("%Y-%m-%d %H:%M:%S")
+                        run_id    = f"RUN_{ts_label}"
+
+                        # Write input tabs with date stamp (overwrite each time)
                         for tab_name, df_tab in {
-                            "ActualIncome":  ai_raw,
-                            "JobOverview":   jo_raw,
-                            "Opportunities": op_raw,
-                            "Merged Data":   merged_df,
+                            f"ActualIncome_{ts_label}":  ai_raw,
+                            f"JobOverview_{ts_label}":   jo_raw,
+                            f"Opportunities_{ts_label}": op_raw,
                         }.items():
                             write_sheet_tab(sheets_svc, tab_name, df_tab)
 
-                        log_merge(sheets_svc, run_id=run_id, ts=ts,
-                                  ai_rows=len(ai_raw), jo_rows=len(jo_raw),
-                                  op_rows=len(op_raw), merged_rows=merged_df.shape[0],
-                                  merged_cols=merged_df.shape[1])
+                        # Write merged tab as new hidden sheet
+                        merged_tab, _ = write_merged_tab(sheets_svc, merged_df, ts_label)
+
+                        # Log the run
+                        log_merge(
+                            sheets_svc,
+                            run_id      = run_id,
+                            ts          = ts_log,
+                            ai_rows     = len(ai_raw),
+                            jo_rows     = len(jo_raw),
+                            op_rows     = len(op_raw),
+                            merged_rows = merged_df.shape[0],
+                            merged_cols = merged_df.shape[1],
+                            merged_tab  = merged_tab or "N/A"
+                        )
 
                         sheet_link = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
                         st.success("✅ All data synced to Google Sheets!")
@@ -267,7 +320,7 @@ with tab1:
             except Exception as e:
                 st.error(f"Error: {e}")
 
-        # ── Export Buttons (only shown after merge) ───────────────
+        # ── Export buttons (only after merge) ────────────────────
         if 'df' in st.session_state:
             df  = st.session_state['df']
             ts  = datetime.now().strftime("%Y%m%d_%H%M")
