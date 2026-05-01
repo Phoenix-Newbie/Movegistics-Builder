@@ -4,7 +4,6 @@ import io
 from datetime import datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 import gspread
 
 st.set_page_config(page_title="Movegistics Reports Builder", page_icon="📦", layout="wide")
@@ -28,64 +27,27 @@ hr { border-color:#1e2330 !important; }
 """, unsafe_allow_html=True)
 
 # ── Config ────────────────────────────────────────────────────────────────────
-SHARED_DRIVE_ID = "0AKqJE39oc3-lUk9PVA"
-SHEET_ID        = "1Ni9fhEN5F9nXAYDk5pXGIGAUMqbFeED1mxixMeBQNMQ"
-SCOPES          = [
-    "https://www.googleapis.com/auth/drive",
+SHEET_ID = "1Ni9fhEN5F9nXAYDk5pXGIGAUMqbFeED1mxixMeBQNMQ"
+SCOPES   = [
     "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
 @st.cache_resource
-def get_services():
+def get_sheets_service():
     try:
         creds = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"], scopes=SCOPES
         )
-        drive_svc  = build("drive", "v3", credentials=creds)
-        gc         = gspread.authorize(creds)
-        sheets_svc = build("sheets", "v4", credentials=creds)
-        return drive_svc, gc, sheets_svc
+        return build("sheets", "v4", credentials=creds)
     except Exception as e:
-        st.error(f"Google connection failed: {e}")
-        return None, None, None
+        st.error(f"Google Sheets connection failed: {e}")
+        return None
 
-# ── Save merged Excel to Drive ────────────────────────────────────────────────
-def save_to_drive(df, filename):
-    drive_svc, _, _ = get_services()
-    if drive_svc is None:
-        return None, None
-    try:
-        buf = io.BytesIO()
-        with pd.ExcelWriter(buf, engine='openpyxl') as w:
-            df.to_excel(w, index=False, sheet_name='Merged Data')
-        buf.seek(0)
-        file_metadata = {"name": filename, "parents": [SHARED_DRIVE_ID]}
-        media = MediaIoBaseUpload(
-            buf,
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            resumable=True
-        )
-        uploaded = drive_svc.files().create(
-            body=file_metadata, media_body=media,
-            fields="id, name", supportsAllDrives=True
-        ).execute()
-        file_id = uploaded.get("id")
-        drive_svc.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            supportsAllDrives=True
-        ).execute()
-        link = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
-        return file_id, link
-    except Exception as e:
-        st.error(f"Drive save failed: {e}")
-        return None, None
-
-# ── Write dataframe to a Google Sheet tab ────────────────────────────────────
+# ── Write dataframe to a Google Sheet tab ─────────────────────────────────────
 def write_sheet_tab(sheets_svc, tab_name, df):
     try:
-        # Check if sheet tab exists, create if not
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
         existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
 
@@ -95,13 +57,11 @@ def write_sheet_tab(sheets_svc, tab_name, df):
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
 
-        # Clear existing content
         sheets_svc.spreadsheets().values().clear(
             spreadsheetId=SHEET_ID,
             range=f"'{tab_name}'!A1"
         ).execute()
 
-        # Prepare data: headers + rows, replace NaN with empty string
         df_clean = df.fillna("").astype(str)
         values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
 
@@ -117,7 +77,7 @@ def write_sheet_tab(sheets_svc, tab_name, df):
         return False
 
 # ── Append a row to Merge Log ─────────────────────────────────────────────────
-def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols, filename, drive_link):
+def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols):
     try:
         tab_name   = "Merge Log"
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
@@ -128,10 +88,9 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
                 spreadsheetId=SHEET_ID,
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
-            # Write headers
-            headers = [["Run ID", "Timestamp", "ActualIncome Rows", "JobOverview Rows",
-                        "Opportunities Rows", "Merged Rows", "Merged Columns",
-                        "Export Filename", "Drive Link"]]
+            headers = [["Run ID", "Timestamp", "ActualIncome Rows",
+                        "JobOverview Rows", "Opportunities Rows",
+                        "Merged Rows", "Merged Columns"]]
             sheets_svc.spreadsheets().values().update(
                 spreadsheetId=SHEET_ID,
                 range=f"'{tab_name}'!A1",
@@ -139,9 +98,7 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
                 body={"values": headers}
             ).execute()
 
-        # Append new log row
-        new_row = [[run_id, ts, ai_rows, jo_rows, op_rows,
-                    merged_rows, merged_cols, filename, drive_link]]
+        new_row = [[run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols]]
         sheets_svc.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
             range=f"'{tab_name}'!A1",
@@ -249,7 +206,7 @@ def to_excel_bytes(df):
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.4</span></div>
+<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.5</span></div>
 <div class="hero-sub">CRM Data Merger — JobOverview · ActualIncome · Opportunities</div>
 """, unsafe_allow_html=True)
 st.markdown("---")
@@ -282,75 +239,59 @@ with tab1:
     with right:
         st.markdown('<div class="section-header">⚙️ Merge & Save</div>', unsafe_allow_html=True)
         st.info(
-            "**After merge, auto-saves to Google:**\n\n"
-            "📊 **Sheets tabs:** Merge Log · ActualIncome · JobOverview · Opportunities · Merged Data\n\n"
-            "📁 **Drive:** Excel file copy"
+            "**After merge, auto-saves to Google Sheets:**\n\n"
+            "📊 `Merge Log` · `ActualIncome` · `JobOverview`\n\n"
+            "📊 `Opportunities` · `Merged Data`\n\n"
+            "*(No Excel file saved to Drive)*"
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        if st.button("🔗 Merge & Save to Drive", disabled=not (f1 and f2 and f3), use_container_width=True):
+        if st.button("🔗 Merge & Sync to Sheets", disabled=not (f1 and f2 and f3), use_container_width=True):
             try:
-                # ── Step 1: Merge ───────────────────────────────────────────
+                # Step 1: Merge
                 with st.spinner("Merging CRM files..."):
                     merged_df, ai_raw, jo_raw, op_raw = merge_files(f1, f2, f3)
                     st.session_state['df']          = merged_df
                     st.session_state['filtered_df'] = merged_df
                     st.success(f"✅ Merged! **{merged_df.shape[0]:,} rows** × **{merged_df.shape[1]} columns**")
 
-                # ── Step 2: Save Excel to Drive ─────────────────────────────
-                ts       = datetime.now().strftime("%Y%m%d_%H%M%S")
-                run_id   = f"RUN_{ts}"
-                filename = f"movegistics_merged_{ts}.xlsx"
-
-                with st.spinner("Saving Excel to Google Drive..."):
-                    file_id, drive_link = save_to_drive(merged_df, filename)
-                    if drive_link:
-                        st.success("✅ Excel saved to Google Drive!")
-                        st.markdown(f"📁 [Open in Google Drive]({drive_link})")
-                        st.session_state['drive_link'] = drive_link
-                    else:
-                        drive_link = "N/A"
-
-                # ── Step 3: Write all tabs to Google Sheets ─────────────────
-                _, _, sheets_svc = get_services()
+                # Step 2: Write to Google Sheets
+                sheets_svc = get_sheets_service()
                 if sheets_svc:
-                    with st.spinner("Writing data to Google Sheets..."):
+                    with st.spinner("Syncing to Google Sheets..."):
+                        ts     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        run_id = f"RUN_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
                         tabs = {
                             "ActualIncome":  ai_raw,
                             "JobOverview":   jo_raw,
                             "Opportunities": op_raw,
                             "Merged Data":   merged_df,
                         }
-                        all_ok = True
                         for tab_name, df_tab in tabs.items():
-                            ok = write_sheet_tab(sheets_svc, tab_name, df_tab)
-                            if not ok:
-                                all_ok = False
+                            write_sheet_tab(sheets_svc, tab_name, df_tab)
 
-                        # ── Step 4: Log the run ─────────────────────────────
                         log_merge(
                             sheets_svc,
-                            run_id       = run_id,
-                            ts           = datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            ai_rows      = len(ai_raw),
-                            jo_rows      = len(jo_raw),
-                            op_rows      = len(op_raw),
-                            merged_rows  = merged_df.shape[0],
-                            merged_cols  = merged_df.shape[1],
-                            filename     = filename,
-                            drive_link   = drive_link or "N/A"
+                            run_id      = run_id,
+                            ts          = ts,
+                            ai_rows     = len(ai_raw),
+                            jo_rows     = len(jo_raw),
+                            op_rows     = len(op_raw),
+                            merged_rows = merged_df.shape[0],
+                            merged_cols = merged_df.shape[1],
                         )
 
-                        if all_ok:
-                            st.success("✅ All data written to Google Sheets!")
-                            sheet_link = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
-                            st.markdown(f"📊 [Open Google Sheet]({sheet_link})")
+                        sheet_link = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
+                        st.success("✅ All data synced to Google Sheets!")
+                        st.markdown(f"📊 [Open Google Sheet]({sheet_link})")
+                        st.session_state['sheet_link'] = sheet_link
 
             except Exception as e:
                 st.error(f"Error: {e}")
 
-        if 'drive_link' in st.session_state:
-            st.markdown(f"📁 **Last Drive save:** [Open file]({st.session_state['drive_link']})")
+        if 'sheet_link' in st.session_state:
+            st.markdown(f"📊 **Last sync:** [Open Google Sheet]({st.session_state['sheet_link']})")
 
         if 'df' in st.session_state:
             df = st.session_state['df']
@@ -447,11 +388,9 @@ with tab3:
             st.download_button("⬇ Download Filtered CSV", fdf.to_csv(index=False).encode(),
                 file_name=f"movegistics_filtered_{ts}.csv", mime="text/csv", use_container_width=True)
 
-        if 'drive_link' in st.session_state:
+        if 'sheet_link' in st.session_state:
             st.markdown("---")
-            sheet_link = f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/edit"
-            st.markdown(f"📁 **Drive copy:** [Open Excel file]({st.session_state['drive_link']})")
-            st.markdown(f"📊 **Google Sheet:** [Open Merge Log & Data]({sheet_link})")
+            st.markdown(f"📊 **Google Sheet:** [Open Merge Log & Data]({st.session_state['sheet_link']})")
 
 # ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown("---")
