@@ -55,7 +55,7 @@ def write_sheet_tab(sheets_svc, tab_name, df):
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
         sheets_svc.spreadsheets().values().clear(
-            spreadsheetId=SHEET_ID, range=f"'{tab_name}'!A1"
+            spreadsheetId=SHEET_ID, range=f"'{tab_name}'"
         ).execute()
         df_clean = df.fillna("").astype(str)
         values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
@@ -97,7 +97,11 @@ def write_merged_tab(sheets_svc, df, ts_label):
 # ── Append a row to Merge Log ─────────────────────────────────────────────────
 def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols, merged_tab):
     try:
-        tab_name   = "Merge Log"
+        tab_name = "Merge Log"
+        headers  = ["Run ID", "Timestamp", "ActualIncome Rows", "JobOverview Rows",
+                    "Opportunities Rows", "Merged Rows", "Merged Columns", "Merged Sheet Tab"]
+
+        # ── Ensure the tab exists ─────────────────────────────────────────────
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
         existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
         if tab_name not in existing:
@@ -105,14 +109,26 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
                 spreadsheetId=SHEET_ID,
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
-            headers = [["Run ID", "Timestamp", "ActualIncome Rows", "JobOverview Rows",
-                        "Opportunities Rows", "Merged Rows", "Merged Columns", "Merged Sheet Tab"]]
+
+        # ── Always verify row 1 contains the correct headers ─────────────────
+        row1 = sheets_svc.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID,
+            range=f"'{tab_name}'!A1:H1"
+        ).execute().get("values", [[]])[0] if sheets_svc.spreadsheets().values().get(
+            spreadsheetId=SHEET_ID,
+            range=f"'{tab_name}'!A1:H1"
+        ).execute().get("values") else []
+
+        if row1 != headers:
+            # Row 1 is missing or corrupted — rewrite headers in place
             sheets_svc.spreadsheets().values().update(
                 spreadsheetId=SHEET_ID,
                 range=f"'{tab_name}'!A1",
                 valueInputOption="RAW",
-                body={"values": headers}
+                body={"values": [headers]}
             ).execute()
+
+        # ── Append the new log row ────────────────────────────────────────────
         new_row = [[run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols, merged_tab]]
         sheets_svc.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
