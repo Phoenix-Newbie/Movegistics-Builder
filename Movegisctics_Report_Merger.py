@@ -44,22 +44,19 @@ def get_sheets_service():
         st.error(f"Google Sheets connection failed: {e}")
         return None
 
-# ── Write/overwrite a tab (for input files) ───────────────────────────────────
+# ── Write/overwrite a tab ─────────────────────────────────────────────────────
 def write_sheet_tab(sheets_svc, tab_name, df):
     try:
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
-        existing   = {s['properties']['title']: s['properties']['sheetId'] for s in sheet_meta['sheets']}
-
+        existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
         if tab_name not in existing:
             sheets_svc.spreadsheets().batchUpdate(
                 spreadsheetId=SHEET_ID,
                 body={"requests": [{"addSheet": {"properties": {"title": tab_name}}}]}
             ).execute()
-
         sheets_svc.spreadsheets().values().clear(
             spreadsheetId=SHEET_ID, range=f"'{tab_name}'!A1"
         ).execute()
-
         df_clean = df.fillna("").astype(str)
         values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
         sheets_svc.spreadsheets().values().update(
@@ -76,23 +73,14 @@ def write_sheet_tab(sheets_svc, tab_name, df):
 # ── Create new hidden tab for Merged Data ────────────────────────────────────
 def write_merged_tab(sheets_svc, df, ts_label):
     try:
-        tab_name   = f"Merged_{ts_label}"
-        sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
-        existing   = {s['properties']['title']: s['properties']['sheetId'] for s in sheet_meta['sheets']}
-
-        # Always create a new sheet with timestamp name
+        tab_name = f"Merged_{ts_label}"
         res = sheets_svc.spreadsheets().batchUpdate(
             spreadsheetId=SHEET_ID,
             body={"requests": [{"addSheet": {"properties": {
                 "title":  tab_name,
-                "hidden": True   # ← auto-hide the tab
+                "hidden": True
             }}}]}
         ).execute()
-
-        # Get the new sheet's ID from the response
-        new_sheet_id = res['replies'][0]['addSheet']['properties']['sheetId']
-
-        # Write data
         df_clean = df.fillna("").astype(str)
         values   = [df_clean.columns.tolist()] + df_clean.values.tolist()
         sheets_svc.spreadsheets().values().update(
@@ -101,11 +89,10 @@ def write_merged_tab(sheets_svc, df, ts_label):
             valueInputOption="RAW",
             body={"values": values}
         ).execute()
-
-        return tab_name, new_sheet_id
+        return tab_name
     except Exception as e:
         st.warning(f"Could not write Merged Data tab: {e}")
-        return None, None
+        return None
 
 # ── Append a row to Merge Log ─────────────────────────────────────────────────
 def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols, merged_tab):
@@ -113,7 +100,6 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
         tab_name   = "Merge Log"
         sheet_meta = sheets_svc.spreadsheets().get(spreadsheetId=SHEET_ID).execute()
         existing   = [s['properties']['title'] for s in sheet_meta['sheets']]
-
         if tab_name not in existing:
             sheets_svc.spreadsheets().batchUpdate(
                 spreadsheetId=SHEET_ID,
@@ -127,7 +113,6 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
                 valueInputOption="RAW",
                 body={"values": headers}
             ).execute()
-
         new_row = [[run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, merged_cols, merged_tab]]
         sheets_svc.spreadsheets().values().append(
             spreadsheetId=SHEET_ID,
@@ -141,7 +126,7 @@ def log_merge(sheets_svc, run_id, ts, ai_rows, jo_rows, op_rows, merged_rows, me
         st.warning(f"Could not write Merge Log: {e}")
         return False
 
-# ── Merge helpers ─────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 def load_clean(file_or_path):
     df = pd.read_excel(file_or_path, engine='openpyxl', header=None)
     for i in range(min(5, len(df))):
@@ -167,20 +152,31 @@ def fix_duplicate_cols(df):
     df.columns = new_cols
     return df
 
-def merge_files(f_ai, f_jo, f_op):
-    ai = load_clean(f_ai)
-    jo = load_clean(f_jo)
-    op = load_clean(f_op)
-
-    for df in [ai, jo, op]:
+def load_and_append(files):
+    """Load multiple files and append them into one DataFrame."""
+    dfs = []
+    for f in files:
+        df = load_clean(f)
         fix_duplicate_cols(df)
         if '#' in df.columns:
             df.drop(columns=['#'], inplace=True)
+        dfs.append(df)
+    combined = pd.concat(dfs, ignore_index=True)
+    combined.drop_duplicates(inplace=True)
+    combined.reset_index(drop=True, inplace=True)
+    return combined
+
+def merge_files(f_ai_list, f_jo_list, f_op_list):
+    # Load & append each group
+    ai = load_and_append(f_ai_list)
+    jo = load_and_append(f_jo_list)
+    op = load_and_append(f_op_list)
 
     ai_raw = ai.copy()
     jo_raw = jo.copy()
     op_raw = op.copy()
 
+    # Prepare ActualIncome
     ai.rename(columns={'Customer Id': 'Customer ID', 'Customer Name': 'Customer Name_ai'}, inplace=True)
     ai_bring = ['Work Order', 'Customer Name_ai', 'Move Coordinator', 'Move Type', 'Move Status',
                 'Move Charges', 'Packing Charges', 'Crating Charges', 'Additional Charges',
@@ -188,6 +184,7 @@ def merge_files(f_ai, f_jo, f_op):
                 'Valuation Charges', 'Discount', 'Service Tax', 'Tips', 'CC Fee', 'Grand Total']
     ai_slim = ai[[c for c in ai_bring if c in ai.columns]]
 
+    # Prepare JobOverview
     jo.rename(columns={
         'Customer Id':  'Customer ID',
         'Account Name': 'Customer Name',
@@ -196,11 +193,13 @@ def merge_files(f_ai, f_jo, f_op):
     }, inplace=True)
     jo.drop(columns=[c for c in ['Opportunity Name'] if c in jo.columns], inplace=True)
 
+    # Merge 1: JO + AI
     m1 = pd.merge(jo, ai_slim, left_on='WO Id', right_on='Work Order', how='left')
     m1.drop(columns=['Work Order'], inplace=True)
     m1['Customer Name'] = m1['Customer Name'].fillna(m1.get('Customer Name_ai'))
     m1.drop(columns=[c for c in ['Customer Name_ai'] if c in m1.columns], inplace=True)
 
+    # Prepare Opportunities
     op.rename(columns={
         'Cust. Id':    'Customer ID',
         'Opp. Amount': 'Estimated_op',
@@ -215,6 +214,7 @@ def merge_files(f_ai, f_jo, f_op):
                 'Origin Details', 'Location Type', 'Destination Details']
     op_slim = op[[c for c in op_bring if c in op.columns]]
 
+    # Merge 2: + OP
     m2 = pd.merge(m1, op_slim, on='Customer ID', how='left')
     m2['Estimated'] = m2['Estimated'].fillna(m2.get('Estimated_op'))
     m2.drop(columns=[c for c in ['Estimated_op', 'Move Date_op', 'Date Booked_op'] if c in m2.columns], inplace=True)
@@ -231,7 +231,7 @@ def to_excel_bytes(df):
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown("""
-<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.7</span></div>
+<div class="hero-title">📦 Movegistics Reports Builder<span class="version-badge">v1.8</span></div>
 <div class="hero-sub">CRM Data Merger — JobOverview · ActualIncome · Opportunities</div>
 """, unsafe_allow_html=True)
 st.markdown("---")
@@ -246,35 +246,46 @@ with tab1:
     with left:
         st.markdown('<div class="section-header">📂 Upload CRM Files</div>', unsafe_allow_html=True)
 
-        st.markdown("**① ActualIncome Work Order Report**")
-        f1 = st.file_uploader("ActualIncome", type=["xlsx","xls"], key="f1", label_visibility="collapsed")
-        if f1: st.markdown('<span class="status-ok">✓ Loaded</span>', unsafe_allow_html=True)
+        st.markdown("**① ActualIncome Work Order Report** *(multiple files allowed)*")
+        f1_list = st.file_uploader("ActualIncome", type=["xlsx","xls"],
+                                   key="f1", accept_multiple_files=True,
+                                   label_visibility="collapsed")
+        if f1_list:
+            st.markdown(f'<span class="status-ok">✓ {len(f1_list)} file(s) loaded — will be appended</span>', unsafe_allow_html=True)
 
-        st.markdown("<br>**② Job Overview Detail** *(base file)*", unsafe_allow_html=True)
-        f2 = st.file_uploader("JobOverview", type=["xlsx","xls"], key="f2", label_visibility="collapsed")
-        if f2: st.markdown('<span class="status-ok">✓ Loaded</span>', unsafe_allow_html=True)
+        st.markdown("<br>**② Job Overview Detail** *(multiple files allowed)*", unsafe_allow_html=True)
+        f2_list = st.file_uploader("JobOverview", type=["xlsx","xls"],
+                                   key="f2", accept_multiple_files=True,
+                                   label_visibility="collapsed")
+        if f2_list:
+            st.markdown(f'<span class="status-ok">✓ {len(f2_list)} file(s) loaded — will be appended</span>', unsafe_allow_html=True)
 
-        st.markdown("<br>**③ Opportunities By Stage**", unsafe_allow_html=True)
-        f3 = st.file_uploader("Opportunities", type=["xlsx","xls"], key="f3", label_visibility="collapsed")
-        if f3: st.markdown('<span class="status-ok">✓ Loaded</span>', unsafe_allow_html=True)
+        st.markdown("<br>**③ Opportunities By Stage** *(multiple files allowed)*", unsafe_allow_html=True)
+        f3_list = st.file_uploader("Opportunities", type=["xlsx","xls"],
+                                   key="f3", accept_multiple_files=True,
+                                   label_visibility="collapsed")
+        if f3_list:
+            st.markdown(f'<span class="status-ok">✓ {len(f3_list)} file(s) loaded — will be appended</span>', unsafe_allow_html=True)
 
-        if not (f1 and f2 and f3):
-            st.markdown("<br><span class='status-wait'>⚠ Upload all 3 files to enable merge</span>", unsafe_allow_html=True)
+        all_uploaded = f1_list and f2_list and f3_list
+        if not all_uploaded:
+            st.markdown("<br><span class='status-wait'>⚠ Upload at least 1 file per slot to enable merge</span>", unsafe_allow_html=True)
 
     with right:
         st.markdown('<div class="section-header">⚙️ Merge & Save</div>', unsafe_allow_html=True)
         st.info(
+            "**Multiple files per slot are appended together before merging.**\n\n"
             "**After merge, auto-saves to Google Sheets:**\n\n"
             "📊 `Merge Log` · `ActualIncome` · `JobOverview` · `Opportunities`\n\n"
             "📊 `Merged_YYYYMMDD_HHMMSS` *(new hidden tab per run)*"
         )
         st.markdown("<br>", unsafe_allow_html=True)
 
-        if st.button("🔗 Merge & Sync to Sheets", disabled=not (f1 and f2 and f3), use_container_width=True):
+        if st.button("🔗 Merge & Sync to Sheets", disabled=not all_uploaded, use_container_width=True):
             try:
                 # Step 1: Merge
                 with st.spinner("Merging CRM files..."):
-                    merged_df, ai_raw, jo_raw, op_raw = merge_files(f1, f2, f3)
+                    merged_df, ai_raw, jo_raw, op_raw = merge_files(f1_list, f2_list, f3_list)
                     st.session_state['df']          = merged_df
                     st.session_state['filtered_df'] = merged_df
                     st.success(f"✅ Merged! **{merged_df.shape[0]:,} rows** × **{merged_df.shape[1]} columns**")
@@ -283,12 +294,11 @@ with tab1:
                 sheets_svc = get_sheets_service()
                 if sheets_svc:
                     with st.spinner("Syncing to Google Sheets..."):
-                        now       = datetime.now()
-                        ts_label  = now.strftime("%Y%m%d_%H%M%S")
-                        ts_log    = now.strftime("%Y-%m-%d %H:%M:%S")
-                        run_id    = f"RUN_{ts_label}"
+                        now      = datetime.now()
+                        ts_label = now.strftime("%Y%m%d_%H%M%S")
+                        ts_log   = now.strftime("%Y-%m-%d %H:%M:%S")
+                        run_id   = f"RUN_{ts_label}"
 
-                        # Write input tabs with date stamp (overwrite each time)
                         for tab_name, df_tab in {
                             f"ActualIncome_{ts_label}":  ai_raw,
                             f"JobOverview_{ts_label}":   jo_raw,
@@ -296,10 +306,8 @@ with tab1:
                         }.items():
                             write_sheet_tab(sheets_svc, tab_name, df_tab)
 
-                        # Write merged tab as new hidden sheet
-                        merged_tab, _ = write_merged_tab(sheets_svc, merged_df, ts_label)
+                        merged_tab = write_merged_tab(sheets_svc, merged_df, ts_label)
 
-                        # Log the run
                         log_merge(
                             sheets_svc,
                             run_id      = run_id,
@@ -331,26 +339,22 @@ with tab1:
             c1, c2, c3 = st.columns(3)
             c1.metric("Total Rows",   f"{df.shape[0]:,}")
             c2.metric("Columns",      f"{df.shape[1]}")
-            c3.metric("Files Merged", "3")
+            c3.metric("Files Merged", f"{len(f1_list or [])+len(f2_list or [])+len(f3_list or [])}")
 
             st.markdown("<br>", unsafe_allow_html=True)
             ex1, ex2 = st.columns(2)
-
             with ex1:
                 st.download_button(
-                    "⬇ Download Excel",
-                    to_excel_bytes(df),
+                    "⬇ Download Excel", to_excel_bytes(df),
                     file_name=f"movegistics_merged_{ts}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     use_container_width=True
                 )
             with ex2:
                 st.download_button(
-                    "⬇ Download CSV",
-                    df.to_csv(index=False).encode(),
+                    "⬇ Download CSV", df.to_csv(index=False).encode(),
                     file_name=f"movegistics_merged_{ts}.csv",
-                    mime="text/csv",
-                    use_container_width=True
+                    mime="text/csv", use_container_width=True
                 )
 
             if 'sheet_link' in st.session_state:
